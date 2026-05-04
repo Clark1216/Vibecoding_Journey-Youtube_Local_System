@@ -1,1 +1,7 @@
 yt-dlp>=2025.1.0
+
+# Note: ffmpeg is required for merging video and audio streams.
+# Install it separately:
+# - Windows: Download from https://ffmpeg.org/download.html or use Chocolatey: choco install ffmpeg
+# - macOS: brew install ffmpeg
+# - Linux: apt install ffmpeg or yum install ffmpeg
