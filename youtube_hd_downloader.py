@@ -6,6 +6,8 @@ Usage examples:
   python youtube_hd_downloader.py --output "downloads/%(title)s.%(ext)s"
   python youtube_hd_downloader.py --allow-lower-resolution
   python youtube_hd_downloader.py --cookies cookies.txt "https://www.youtube.com/watch?v=..."
+  python youtube_hd_downloader.py --write-subs --sub-langs en "https://www.youtube.com/watch?v=..."
+  python youtube_hd_downloader.py --subtitles-only --write-auto-subs --convert-subs srt "https://www.youtube.com/watch?v=..."
 
 Handles age-restricted, region-locked, and copyright-claimed videos automatically.
 If only images are available, the video is completely blocked and cannot be downloaded.
@@ -19,6 +21,7 @@ import os
 import shutil
 import sys
 from typing import Any
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -44,6 +47,36 @@ def parse_args() -> argparse.Namespace:
         "--cookies",
         default="cookies.txt",
         help="Path to cookies file for age-restricted or login-required videos (default: cookies.txt in root).",
+    )
+    parser.add_argument(
+        "--write-subs",
+        action="store_true",
+        help="Download manually provided subtitles with the video.",
+    )
+    parser.add_argument(
+        "--write-auto-subs",
+        action="store_true",
+        help="Download YouTube auto-generated subtitles.",
+    )
+    parser.add_argument(
+        "--subtitles-only",
+        action="store_true",
+        help="Download subtitles without downloading the video.",
+    )
+    parser.add_argument(
+        "--sub-langs",
+        default="en",
+        help="Comma-separated subtitle languages to download (default: en, use all for every language).",
+    )
+    parser.add_argument(
+        "--sub-format",
+        default="srt/vtt/best",
+        help="Subtitle download preference for yt-dlp (default: srt/vtt/best).",
+    )
+    parser.add_argument(
+        "--convert-subs",
+        default="srt",
+        help="Convert downloaded subtitles to this format (default: srt, use none to disable).",
     )
     return parser.parse_args()
 
@@ -98,6 +131,74 @@ def build_ydl_options(
     return options
 
 
+def add_subtitle_options(
+    options: dict[str, Any],
+    write_subs: bool,
+    write_auto_subs: bool,
+    subtitles_only: bool,
+    sub_langs: str,
+    sub_format: str,
+    convert_subs: str,
+) -> dict[str, Any]:
+    if not (write_subs or write_auto_subs or subtitles_only):
+        return options
+
+    subtitle_options = options.copy()
+    subtitle_options.update(
+        {
+            "writesubtitles": write_subs or subtitles_only,
+            "writeautomaticsub": write_auto_subs,
+            "subtitleslangs": [
+                lang.strip() for lang in sub_langs.split(",") if lang.strip()
+            ],
+            "subtitlesformat": sub_format,
+        }
+    )
+    if convert_subs and convert_subs.lower() != "none":
+        subtitle_options["postprocessors"] = [
+            *subtitle_options.get("postprocessors", []),
+            {
+                "key": "FFmpegSubtitlesConvertor",
+                "format": convert_subs,
+                "when": "before_dl",
+            },
+        ]
+    if subtitles_only:
+        subtitle_options["skip_download"] = True
+    return subtitle_options
+
+
+def download_subtitles(
+    YoutubeDL: Any,
+    url: str,
+    output_template: str,
+    cookies: str | None = None,
+    sub_langs: str = "en",
+    sub_format: str = "srt/vtt/best",
+    convert_subs: str = "srt",
+    include_auto_subs: bool = True,
+) -> None:
+    subtitle_options = add_subtitle_options(
+        {
+            "outtmpl": output_template,
+            "noplaylist": True,
+            "quiet": False,
+            "no_warnings": False,
+        },
+        write_subs=True,
+        write_auto_subs=include_auto_subs,
+        subtitles_only=True,
+        sub_langs=sub_langs,
+        sub_format=sub_format,
+        convert_subs=convert_subs,
+    )
+    if cookies:
+        subtitle_options["cookiefile"] = cookies
+
+    with YoutubeDL(subtitle_options) as ydl:
+        ydl.download([url])
+
+
 def main() -> int:
     args = parse_args()
 
@@ -121,13 +222,36 @@ def main() -> int:
             "Warning: ffmpeg is not installed. Using combined-format fallback when possible.",
             file=sys.stderr,
         )
+        if (
+            (args.write_subs or args.write_auto_subs or args.subtitles_only)
+            and args.convert_subs.lower() != "none"
+        ):
+            print(
+                "Warning: converting subtitles to srt requires ffmpeg.",
+                file=sys.stderr,
+            )
 
-    ydl_opts = build_ydl_options(
-        args.output,
-        args.allow_lower_resolution,
-        ffmpeg_available,
-        args.cookies if os.path.exists(args.cookies) else None,
-    )
+    def make_ydl_options(
+        cookies: str | None = None,
+        fallback_mode: bool = False,
+    ) -> dict[str, Any]:
+        return add_subtitle_options(
+            build_ydl_options(
+                args.output,
+                args.allow_lower_resolution,
+                ffmpeg_available,
+                cookies,
+                fallback_mode=fallback_mode,
+            ),
+            args.write_subs,
+            args.write_auto_subs,
+            args.subtitles_only,
+            args.sub_langs,
+            args.sub_format,
+            args.convert_subs,
+        )
+
+    ydl_opts = make_ydl_options(args.cookies if os.path.exists(args.cookies) else None)
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
@@ -154,12 +278,7 @@ def main() -> int:
                     f"Retrying with cookies ({cookies_file})...",
                     file=sys.stderr,
                 )
-                ydl_opts_with_cookies = build_ydl_options(
-                    args.output,
-                    args.allow_lower_resolution,
-                    ffmpeg_available,
-                    cookies_file,
-                )
+                ydl_opts_with_cookies = make_ydl_options(cookies_file)
                 try:
                     with YoutubeDL(ydl_opts_with_cookies) as ydl:
                         ydl.download([url])
@@ -171,7 +290,9 @@ def main() -> int:
                             file=sys.stderr,
                         )
                         try:
-                            with YoutubeDL({**ydl_opts_with_cookies, "listformats": True}) as ydl:
+                            with YoutubeDL(
+                                {**ydl_opts_with_cookies, "listformats": True}
+                            ) as ydl:
                                 ydl.download([url])
                         except Exception:
                             pass
@@ -183,10 +304,7 @@ def main() -> int:
                             "Retrying with copyright-friendly format selection...",
                             file=sys.stderr,
                         )
-                        ydl_opts_fallback = build_ydl_options(
-                            args.output,
-                            args.allow_lower_resolution,
-                            ffmpeg_available,
+                        ydl_opts_fallback = make_ydl_options(
                             cookies_file,
                             fallback_mode=True,
                         )
@@ -210,13 +328,7 @@ def main() -> int:
                     "Retrying with copyright-friendly format selection...",
                     file=sys.stderr,
                 )
-                ydl_opts_fallback = build_ydl_options(
-                    args.output,
-                    args.allow_lower_resolution,
-                    ffmpeg_available,
-                    None,
-                    fallback_mode=True,
-                )
+                ydl_opts_fallback = make_ydl_options(fallback_mode=True)
                 try:
                     with YoutubeDL(ydl_opts_fallback) as ydl:
                         ydl.download([url])
@@ -234,12 +346,7 @@ def main() -> int:
                 f"Video appears age-restricted. Retrying with cookies ({cookies_file})...",
                 file=sys.stderr,
             )
-            ydl_opts_with_cookies = build_ydl_options(
-                args.output,
-                args.allow_lower_resolution,
-                ffmpeg_available,
-                cookies_file,
-            )
+            ydl_opts_with_cookies = make_ydl_options(cookies_file)
             try:
                 with YoutubeDL(ydl_opts_with_cookies) as ydl:
                     ydl.download([url])
